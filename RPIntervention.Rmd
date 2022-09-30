@@ -1,0 +1,1352 @@
+---
+title: "R code for RPIntervention"
+output: html_document
+---
+
+```{r setup}
+library(car)
+library(corrplot)
+library(effsize)
+library(ggpubr)
+library(Hmisc)
+library(irr)
+library(jtools)
+library(lavaan)
+library(mnormt)
+library(nFactors)
+library(PerformanceAnalytics)
+library(psych)
+library(rstatix)
+library(semTools)
+library(sjPlot)
+library(stats)
+library(dplyr)
+library(tidyr)
+
+getwd()
+
+RP <- read.csv("RPIntervention.csv")
+head(RP)
+str(RP)
+names(RP)
+
+PMK_OE_Coder1 <- read.csv("PMK_OE_Coder1.csv")
+head(PMK_OE_Coder1)
+str(PMK_OE_Coder1)
+names(PMK_OE_Coder1)
+
+PMK_OE_Coder2 <- read.csv("PMK_OE_Coder2.csv")
+head(PMK_OE_Coder2)
+str(PMK_OE_Coder2)
+names(PMK_OE_Coder2)
+```
+
+
+```{r demographics}
+# ------ condition # factor ------
+RP$condition
+str(RP$condition)
+RP$condition <- as.factor(RP$condition)
+levels(RP$condition)
+table(RP$condition) # 191 vs. 195
+prop.table(table(RP$condition))
+# delayed only
+table(RP[RP$returned == "Y",]$condition) # 139 vs. 141
+prop.table(table(RP[RP$returned == "Y",]$condition))
+
+# ------ gender_recode # factor ------
+RP$gender
+str(RP$gender)
+RP$gender <- as.factor(RP$gender)
+levels(RP$gender)
+RP <- RP %>%
+    mutate(gender_recode = ifelse(gender == "Cisgender female" | gender == "f" | gender == "F" | 
+                                      gender == "female" | gender == "Female" | gender == "female " | 
+                                      gender == "Female " | gender == "femals" | gender == "she/her female" | 
+                                      gender == "woman" | gender == "Woman" | gender == "woman ", "F", 
+                                  ifelse(gender == "male" | gender == "Male" | gender == "male " | 
+                                             gender == "Mle", "M", 
+                                         ifelse(gender == "gender fluid " | gender == "genderfluid" | 
+                                                    gender == "non-binary" | gender == "Nonbinary", "other", NA))))
+RP$gender_recode
+RP$gender_recode <- as.factor(RP$gender_recode)
+levels(RP$gender_recode)
+table(RP$gender_recode)
+prop.table(table(RP$gender_recode))
+# delayed only
+table(RP[RP$returned == "Y",]$gender_recode)
+prop.table(table(RP[RP$returned == "Y",]$gender_recode))
+
+# ------ ethnicity & URM # factor ------
+RP$ethnicity
+str(RP$ethnicity)
+# 1 = Afican American or Black, 2 = American Indian or Alaska Native, 3 = Asian, 4 = Hispanic or Latino/a, 5 = Middle Eastern, 6 = Native Hawaiian or Other Pacific Islander, 7 = White or Caucasian, 8 = Other
+RP$ethnicity <- as.factor(RP$ethnicity)
+levels(RP$ethnicity)
+table(RP$ethnicity)
+prop.table(table(RP$ethnicity))
+# delayed only
+table(RP[RP$returned == "Y",]$ethnicity)
+prop.table(table(RP[RP$returned == "Y",]$ethnicity))
+
+# URM defined as 1, 2, 4, or 6
+RP <- RP %>%
+    mutate(URM = ifelse(ethnicity == 1 | ethnicity == 2 | ethnicity == 4 | ethnicity == 6, "URM", 
+                        ifelse(ethnicity == 3 | ethnicity == 5 | ethnicity == 7 | ethnicity == 8, "non-URM", NA)))
+RP$URM
+RP$URM <- as.factor(RP$URM)
+levels(RP$URM)
+table(RP$URM)
+prop.table(table(RP$URM))
+# delayed only
+table(RP[RP$returned == "Y",]$URM)
+prop.table(table(RP[RP$returned == "Y",]$URM))
+
+# ------ firstGen # factor ------
+RP$momEd
+str(RP$momEd)
+RP$dadEd
+str(RP$dadEd)
+# 1 = Elementary or middle school, 2 = High school, 3 = Technical college, 4 = Some college, no degree, 5 = Associate's degree, 6 = Bachelor's degree, 7 = Graduate degree, 8 = NA
+# firstGen defined as neither parents has a bachelor's degree or higher (opposite is either parent has a bachelor's degree or higher)
+RP <- RP %>%
+    mutate(firstGen = ifelse(momEd == 8 & dadEd == 8, NA, 
+                             ifelse(momEd >= 6 | dadEd >= 6, "non-firstGen", "firstGen")))
+RP$firstGen
+RP$firstGen <- as.factor(RP$firstGen)
+levels(RP$firstGen)
+table(RP$firstGen)
+prop.table(table(RP$firstGen))
+# delayed only
+table(RP[RP$returned == "Y",]$firstGen)
+prop.table(table(RP[RP$returned == "Y",]$firstGen))
+
+# ------ age # int ------
+RP$age
+str(RP$age)
+mean(RP$age, na.rm = TRUE)
+sd(RP$age, na.rm = TRUE)
+# delayed only
+mean(RP[RP$returned == "Y",]$age, na.rm = TRUE)
+sd(RP[RP$returned == "Y",]$age, na.rm = TRUE)
+```
+
+
+```{r dimension reduction}
+names(RP)
+# nFactors::nScree does not remove NAs
+RP_D <- RP[RP$returned == "Y",]
+RP_D$returned
+
+# ------ TMK immediate (CFA) ------
+# 1 = Completely Disagree, 7 = Completely Agree, higher score supports RP
+# TMK_2 & TMK_3 are reverse scored
+RP <- RP %>%
+    mutate(TMK_2R = 8 - TMK_2,
+           TMK_3R = 8 - TMK_3)
+# look at recode in Qualtrics & range
+summary(RP[c("TMK_1", "TMK_2R", "TMK_3R", "TMK_4", "TMK_5")])
+
+# CFA, see https://lavaan.ugent.be/tutorial/cfa.html, for a more technical overview see https://stats.idre.ucla.edu/r/seminars/rcfa/
+TMK_1factor <- 'TMK_factor =~ TMK_1 + TMK_2R + TMK_3R + TMK_4 + TMK_5'
+fit_TMK_1factor <- cfa(TMK_1factor, data = RP)
+summary(fit_TMK_1factor, fit.measures = TRUE, standardized = TRUE) # n = 386
+# chi2(5) = 125.260, p < 0.001; CFI = 0.825; TLI = 0.651; RMSEA = 0.250
+inspect(fit_TMK_1factor, what = "std")
+
+# ------ TMK delayed (CFA) ------
+# 1 = Completely Disagree, 7 = Completely Agree, higher score supports RP
+# TMK_2_D & TMK_3_D are reverse scored
+RP <- RP %>%
+    mutate(TMK_2R_D = 8 - TMK_2_D,
+           TMK_3R_D = 8 - TMK_3_D)
+# look at recode in Qualtrics & range
+summary(RP[c("TMK_1_D", "TMK_2R_D", "TMK_3R_D", "TMK_4_D", "TMK_5_D")])
+
+# CFA
+TMK_D_1factor <- 'TMK_D_factor =~ TMK_1_D + TMK_2R_D + TMK_3R_D + TMK_4_D + TMK_5_D'
+fit_TMK_D_1factor <- cfa(TMK_D_1factor, data = RP)
+summary(fit_TMK_D_1factor, fit.measures = TRUE) # n = 280
+# chi2(5) = 64.542, p < 0.001; CFI = 0.883; TLI = 0.765; RMSEA = 0.206
+inspect(fit_TMK_D_1factor, what = "std")
+
+RP <- RP %>%
+    mutate(TMK = (TMK_1 + TMK_2R + TMK_3R + TMK_4 + TMK_5)/5,
+           TMK_D = (TMK_1_D + TMK_2R_D + TMK_3R_D + TMK_4_D + TMK_5_D)/5)
+
+# ------ PMK general immediate & delayed ------
+RP <- RP %>%
+  mutate(typical=(flashcards+practicetests),
+         typical_D=(flashcards_D+practicetests_D),
+         general=(activeretrieve+assignments+structure+prompts+freerecall+selfexplain+nonexperts+experts),
+         general_D=(activeretrieve_D+assignments_D+structure_D+prompts_D+freerecall_D+selfexplain_D+nonexperts_D+experts_D))
+RP$typical
+RP$typical_D
+RP$general
+RP$general_D
+
+# ------ theoretical overlap between use_generalRP and PMK general ------
+overlap <- (sum(RP$structure,na.rm=T)+sum(RP$prompts,na.rm=T)+sum(RP$freerecall,na.rm=T)+sum(RP$selfexplain,na.rm=T)+sum(RP$nonexperts,na.rm=T)+sum(RP$structure_D,na.rm=T)+sum(RP$prompts_D,na.rm=T)+sum(RP$freerecall_D,na.rm=T)+sum(RP$selfexplain_D,na.rm=T)+sum(RP$nonexperts_D,na.rm=T))/(sum(RP$general,na.rm=T)+sum(RP$general_D,na.rm=T))
+overlap
+
+# ------ PMK self-efficacy immediate (EFA just identified) ------
+# AKA df = 0 and fit indices are NAs
+# 1 = Completely Disagree, 7 = Completely Agree, higher score indicates knowing how to use RP
+# look at recode in Qualtrics & range
+summary(RP[c("PMK_1", "PMK_2", "PMK_3")]) # 1 NA in PMK_2
+RP_PMK <- RP[is.na(RP$PMK_2) == FALSE,] 
+RP_PMK$PMK_2 # n = 385, RP_PMK only used in nScree
+
+# EFA
+Eigen_PMK <- nScree(RP_PMK[c("PMK_1", "PMK_2", "PMK_3")], model="factors")
+Eigen_PMK # noc: 1, naf: 1, nparallel: 1, nkaiser: 1
+plot(Eigen_PMK)
+EFA1_PMK = fa(RP[c("PMK_1", "PMK_2", "PMK_3")], 1) # fm = "minres", rotate = "oblimin", scores = "regression"
+print(EFA1_PMK$loadings, cutoff = 0.3) # pattern matrix
+print(EFA1_PMK$Structure, cutoff = 0.3) # structure matrix
+EFA1_PMK 
+
+# ------ PMK self-efficacy delayed (EFA just identified) ------
+# AKA df = 0 and fit indices are NAs
+# 1 = Completely Disagree, 7 = Completely Agree, higher score indicates knowing how to use RP
+# look at recode in Qualtrics & range
+summary(RP[c("PMK_1_D", "PMK_2_D", "PMK_3_D")]) # 106 NAs, n = 280
+
+# EFA
+Eigen_PMK_D <- nScree(RP_D[c("PMK_1_D", "PMK_2_D", "PMK_3_D")], model="factors")
+Eigen_PMK_D # noc: 1, naf: 1, nparallel: 1, nkaiser: 1
+plot(Eigen_PMK_D)
+EFA1_PMK_D = fa(RP[c("PMK_1_D", "PMK_2_D", "PMK_3_D")], 1) # fm = "minres", rotate = "oblimin", scores = "regression"
+print(EFA1_PMK_D$loadings, cutoff = 0.3) # pattern matrix
+print(EFA1_PMK_D$Structure, cutoff = 0.3) # structure matrix
+EFA1_PMK_D 
+
+RP <- RP %>%
+    mutate(PMK = (PMK_1 + PMK_2 + PMK_3)/3,
+           PMK_D = (PMK_1_D + PMK_2_D + PMK_3_D)/3)
+
+# ------ cost immediate (EFA) ------
+# 1 = Completely Disagree, 7 = Completely Agree, higher score indicates higher cost
+# items 1-4 are about time cost, items 4-9 are about effort cost
+# look at recode in Qualtrics & range
+summary(RP[c("time_1", "time_2", "time_3", "time_4", "effort_1", "effort_2", "effort_3", "effort_4", "effort_5")]) # no NA, n = 386
+
+# EFA
+Eigen_cost <- nScree(RP[c("time_1", "time_2", "time_3", "time_4", "effort_1", "effort_2", "effort_3", "effort_4", "effort_5")], model = "factors")
+Eigen_cost # noc: 1, naf: 1, nparallel: 1, nkaiser: 1
+plot(Eigen_cost)
+EFA1_cost = fa(RP[c("time_1", "time_2", "time_3", "time_4", "effort_1", "effort_2", "effort_3", "effort_4", "effort_5")], nfactors = 1) # fm = "minres", rotate = "oblimin", scores = "regression"
+print(EFA1_cost$loadings, cutoff = 0.3) # pattern matrix
+print(EFA1_cost$Structure, cutoff = 0.3) # structure matrix
+EFA1_cost
+
+# ------ cost delayed (EFA) ------
+# 1 = Completely Disagree, 7 = Completely Agree, higher score indicates higher cost
+# items 1-4 are about time cost, items 4-9 are about effort cost
+# look at recode in Qualtrics & range
+summary(RP[c("time_1_D", "time_2_D", "time_3_D", "time_4_D", "effort_1_D", "effort_2_D", "effort_3_D", "effort_4_D", "effort_5_D")]) # 106 NAs, n = 280
+
+# EFA
+Eigen_cost_D <- nScree(RP_D[c("time_1_D", "time_2_D", "time_3_D", "time_4_D", "effort_1_D", "effort_2_D", "effort_3_D", "effort_4_D", "effort_5_D")], model = "factors")
+Eigen_cost_D # noc: 1, naf: 1, nparallel: 1, nkaiser: 1
+plot(Eigen_cost_D)
+EFA1_cost_D = fa(RP[c("time_1_D", "time_2_D", "time_3_D", "time_4_D", "effort_1_D", "effort_2_D", "effort_3_D", "effort_4_D", "effort_5_D")], nfactors = 1) # fm = "minres", rotate = "oblimin", scores = "regression"
+print(EFA1_cost_D$loadings, cutoff = 0.3) # pattern matrix
+print(EFA1_cost_D$Structure, cutoff = 0.3) # structure matrix
+EFA1_cost_D
+
+RP <- RP %>%
+    mutate(cost = (time_1 + time_2 + time_3 + time_4 +
+                     effort_1 + effort_2 + effort_3 + effort_4 + effort_5)/9,
+           cost_D = (time_1_D + time_2_D + time_3_D + time_4_D +
+                       effort_1_D + effort_2_D + effort_3_D + effort_4_D + effort_5_D)/9)
+
+# ------ beliefs immediate (EFA) ------
+# 1 = Not at all true, 7 = Very true
+# effort beliefs, higher score supports more effort less ability
+# failure beliefs, higher score supports failure indicates less learning and performance
+# difficulty as importance
+# difficulty as impossibility
+# theory of intelligence, higher score indicates fixed
+# look at recode in Qualtrics & range
+summary(RP[c("effortBelief_1", "effortBelief_2", "failure_1", "failure_2", "diffImport_1", "diffImport_2", "diffImport_3", "diffImport_4", "diffImposs_1", "diffImposs_2", "diffImposs_3", "diffImposs_4", "fixed_1", "fixed_2")]) # no NA, n = 386
+
+# ------ beliefs measurement invariance ------
+#https://towardsdatascience.com/testing-for-measurement-invariance-in-r-b44cace10148
+#https://users.ugent.be/~yrosseel/lavaan/multiplegroup6Dec2012.pdf
+# three factor CFA
+CFA3_beliefs13 <- "
+    impossBelief_CFA =~ effortBelief_1 + failure_1 + failure_2 + diffImposs_1 + diffImposs_2 + diffImposs_3 + diffImposs_4
+    diffImport_CFA =~ diffImport_1 + diffImport_2 + diffImport_3 + diffImport_4
+    fixed_CFA =~ fixed_1 + fixed_2
+"
+# covar between factors are estimated by default, so no need to specify
+
+# ------ beliefs config invariance ------
+beliefs13_config <- cfa(CFA3_beliefs13, data = RP, group = "condition")
+summary(beliefs13_config, fit.measures = TRUE, standardized = TRUE)
+# CFI = 0.948, TLI = 0.935, RMSEA = 0.073
+
+# ------ beliefs metric invariance ------
+beliefs13_metric <- cfa(CFA3_beliefs13, data = RP, group = "condition", group.equal = "loadings")
+summary(beliefs13_metric, fit.measures = TRUE, standardized = TRUE)
+
+beliefs13_configvmetric <- compareFit(beliefs13_config, beliefs13_metric)
+summary(beliefs13_configvmetric)
+# chi-sq (10) = 12.37, p = 0.26
+# fewer constraints, more estimated params, fewer dfs
+# better model fit, lower chi-sq (deviation from model-implied data to observed data)
+# we know fewer constraints improve model fit, but we want the new model to be just as good as the old model (more constraints)
+
+# ------ beliefs scalar invariance ------
+beliefs13_scalar <- cfa(CFA3_beliefs13, data = RP, group = "condition", group.equal = c("loadings", "intercepts"))
+summary(beliefs13_scalar, fit.measures = TRUE, standardized = TRUE)
+
+beliefs13_metricvscalar <- compareFit(beliefs13_metric, beliefs13_scalar)
+summary(beliefs13_metricvscalar)
+# chi-sq (10) = 6.44, p = 0.78
+
+# ------ beliefs strict invariance ------
+beliefs13_strict <- cfa(CFA3_beliefs13, data = RP, group = "condition", group.equal = c("loadings", "intercepts", "residuals"))
+summary(beliefs13_strict, fit.measures = TRUE, standardized = TRUE)
+
+beliefs13_scalarvstrict <- compareFit(beliefs13_scalar, beliefs13_strict)
+summary(beliefs13_scalarvstrict)
+# chi-sq (13) = 47.90, p < 0.001 --> scalar invariance only
+
+RP <- RP %>%
+    mutate(impossBelief = (effortBelief_1 + failure_1 + failure_2 + diffImposs_1 + diffImposs_2 + diffImposs_3 + diffImposs_4)/7,
+           diffImport = (diffImport_1 + diffImport_2 + diffImport_3 + diffImport_4)/4,
+           fixed = (fixed_1 + fixed_2)/2)
+
+# ------ use immediate ------
+# 1 = Never, 2 = Rarely, 3 = Sometimes, 4 = Often, 5 = Very often
+# look at recode in Qualtrics & range
+summary(RP[c("use_reread", "use_highlight", "use_flashcards", "use_notes", "use_practice", "use_recall")]) # no NA, n = 386
+
+# ------ use delayed ------
+# 1 = Never, 2 = Rarely, 3 = Sometimes, 4 = Often, 5 = Very often
+# look at recode in Qualtrics & range
+summary(RP[c("use_reread_D", "use_highlight_D", "use_flashcards_D", "use_notes_D", "use_practice_D", "use_recall_D")]) # 106 NAs, n = 280
+
+RP <- RP %>%
+    mutate(use_nonRP = (use_reread + use_highlight)/2,
+           use_typicalRP = (use_flashcards + use_practice)/2,
+           use_generalRP = (use_notes + use_recall)/2,
+           use_RP = (use_flashcards + use_practice + use_notes + use_recall)/4,
+           use_nonRP_D = (use_reread_D + use_highlight_D)/2,
+           use_typicalRP_D = (use_flashcards_D + use_practice_D)/2,
+           use_generalRP_D = (use_notes_D + use_recall_D)/2,
+           use_RP_D = (use_flashcards_D + use_practice_D + use_notes_D + use_recall_D)/4)
+
+# ------ cronbach's alpha ------
+# https://stats.idre.ucla.edu/spss/faq/what-does-cronbachs-alpha-mean/
+# EFA measures dimensionality, cronbach's alpha measures internal consistency
+# TMK, PMK, cost, impossBelief, diffImport, fixed
+alpha_TMK <- psych::alpha(RP[c("TMK_1", "TMK_2R", "TMK_3R", "TMK_4", "TMK_5")])
+alpha_TMK # 0.80
+alpha_PMK <- psych::alpha(RP[c("PMK_1", "PMK_2", "PMK_3")])
+alpha_PMK # 0.79
+alpha_cost <- psych::alpha(RP[c("time_1", "time_2", "time_3", "time_4", "effort_1", "effort_2", "effort_3", "effort_4", "effort_5")])
+alpha_cost # 0.92
+alpha_impossBelief <- psych::alpha(RP[c("effortBelief_1", "failure_1", "failure_2", "diffImposs_1", "diffImposs_2", "diffImposs_3", "diffImposs_4")])
+alpha_impossBelief # 0.85
+alpha_diffImport <- psych::alpha(RP[c("diffImport_1", "diffImport_2", "diffImport_3", "diffImport_4")])
+alpha_diffImport # 0.82
+alpha_fixed <- psych::alpha(RP[c("fixed_1", "fixed_2")])
+alpha_fixed # 0.90
+
+# TMK_D, PMK_D, cost_D
+alpha_TMK_D <- psych::alpha(RP[c("TMK_1_D", "TMK_2R_D", "TMK_3R_D", "TMK_4_D", "TMK_5_D")])
+alpha_TMK_D # 0.81
+alpha_PMK_D <- psych::alpha(RP[c("PMK_1_D", "PMK_2_D", "PMK_3_D")])
+alpha_PMK_D # 0.83
+alpha_cost_D <- psych::alpha(RP[c("time_1_D", "time_2_D", "time_3_D", "time_4_D", "effort_1_D", "effort_2_D", "effort_3_D", "effort_4_D", "effort_5_D")])
+alpha_cost_D # 0.93
+```
+
+
+```{r descriptives}
+# ------ descriptives by condition ------
+names(RP)
+RP_condition_nmsd <- RP %>%
+    group_by(condition) %>%
+    summarize_at(vars(TMK,general,typical,PMK,cost,use_generalRP,use_typicalRP,use_nonRP,
+                      impossBelief, diffImport, fixed), 
+                 funs(num = sum(!is.na(.)), mean, sd), na.rm = TRUE) %>%
+    mutate_if(is.numeric, round, digits = 2)
+# "n() should only be called in a data context", not per column, see https://sebastiansauer.github.io/sum-isna/
+RP_condition_nmsd
+
+RP_condition_nmsd_D <- RP %>%
+    group_by(condition) %>%
+    summarize_at(vars(TMK_D,general_D,typical_D,PMK_D,cost_D,use_generalRP_D,use_typicalRP_D,use_nonRP_D), 
+                 funs(num = sum(!is.na(.)), mean, sd), na.rm = TRUE) %>%
+    mutate_if(is.numeric, round, digits = 2)
+RP_condition_nmsd_D
+
+# ------ correlation matrices by condition ------
+cor_I <- RP[c("TMK","general","typical","PMK","cost","use_generalRP","use_typicalRP","use_nonRP","impossBelief","diffImport","fixed")]
+chart.Correlation(cor_I, histogram = FALSE)
+# font too small
+cor_I_misc <- rcorr(as.matrix(cor_I))
+print(cor_I_misc$r, digits = 2)
+print(cor_I_misc$P, digits = 3)
+
+cor_D <- RP[c("TMK_D","general_D","typical_D","PMK_D","cost_D","use_generalRP_D","use_typicalRP_D","use_nonRP_D")]
+chart.Correlation(cor_D, histogram = FALSE)
+# font too small
+cor_D_misc <- rcorr(as.matrix(cor_D))
+print(cor_D_misc$r, digits = 2)
+print(cor_D_misc$P, digits = 3)
+```
+
+
+```{r hypotheses 1-4}
+# hypothesis 1 H0: no diff between overcoming barriers and traditional
+# ------ TMK immediate two-sided t-test ------
+leveneTest(TMK ~ condition, data = RP) # p = 0.21 --> assume equal var
+
+TMK_I_ttest <- t.test(TMK ~ condition, var.equal = TRUE, data = RP)
+TMK_I_ttest # raw result shows overcoming barriers vs. traditional; t(384) = 1.56, p = 0.12
+
+TMK_I_cohend <- psych::cohen.d(x = RP$TMK, group = RP$condition)
+TMK_I_cohend # raw result shows traditional vs. overcoming barriers vs. traditional; 0.16
+
+# ------ TMK ANOVA ------
+TMK_D_cohend <- psych::cohen.d(x = RP$TMK_D, group = RP$condition) 
+TMK_D_cohend # 0.05
+
+# see https://www.datanovia.com/en/lessons/mixed-anova-in-r/#two-way-mixed
+# gather the columns TMK & TMK_D into long format
+TMK_df <- RP %>%
+    dplyr::select(unique, condition, TMK, TMK_D) %>%
+    rename(T1 = TMK,
+           T2 = TMK_D) %>%
+    gather(key = "time", value = "TMK_score", T1, T2) %>%
+    convert_as_factor(unique, condition, time)
+head(TMK_df)
+# double check n, m, & sd
+TMK_df %>%
+    group_by(time, condition) %>%
+    get_summary_stats(TMK_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# check assumption: no outliers in each cell
+TMK_df %>%
+    group_by(time, condition) %>%
+    identify_outliers(TMK_score) # 4 outliers
+# check assumption: normality in each cell (Shapiro-Wilk test)
+TMK_df %>%
+    group_by(time, condition) %>%
+    shapiro_test(TMK_score) # all p values less than 0.05, but test sensitive to large sample size
+# check assumption: normality in each cell (QQ plot)
+ggqqplot(TMK_df, "TMK_score", ggtheme = theme_bw()) + facet_grid(time ~ condition) # looks okay
+# check assumption: homogeneity of variance between cells
+leveneTest(TMK_score ~ time*condition, data = TMK_df) # p = 0.62
+# check assumption: sphericity AKA equal variance in difference between repeated measures, applies to > 2 repetitions
+
+# mixed ANOVA
+TMK_ANOVA <- anova_test(data = TMK_df, dv = TMK_score, wid = unique, between = condition, within = time, type = 3, effect.size = "pes")
+get_anova_table(TMK_ANOVA)
+# main of condition: F(1, 278) = 0.84, p = 0.36, partial eta2 = 0.003
+# main of time: F(1, 278) = 13.14, p < 0.001***, partial eta2 = 0.045
+# main of interaction: F(1, 278) = 0.94, p = 0.33, partial eta2 = 0.003
+
+# hypothesis 2 H0: overcoming barriers > traditional
+# ------ PMK general examples immediate one-sided t-test ------
+leveneTest(general ~ condition, data = RP) # p = 0.04
+
+PMKOE_I_ttest <- t.test(general ~ condition, alternative = "greater", var.equal = TRUE, data = RP)
+PMKOE_I_ttest # raw result shows overcoming barriers vs. traditional; t(370) = 5.13, p < 0.001***
+
+PMKOE_I_cohend <- psych::cohen.d(x = RP$general, group = RP$condition)
+PMKOE_I_cohend # raw result shows traditional vs. overcoming barriers; 0.53
+
+# ------ PMK general ANOVA ------
+PMKOE_D_cohend <- psych::cohen.d(x = RP$general_D, group = RP$condition)
+PMKOE_D_cohend # 0.48
+
+# gather the columns general & general_D into long format
+PMKOE_df <- RP %>%
+    dplyr::select(unique, condition, general, general_D) %>%
+    rename(T1 = general,
+           T2 = general_D) %>%
+    gather(key = "time", value = "PMKOE_score", T1, T2) %>%
+    convert_as_factor(unique, condition, time)
+head(PMKOE_df)
+# double check n, m, & sd
+PMKOE_df %>%
+    group_by(time, condition) %>%
+    get_summary_stats(PMKOE_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# check assumption: no outliers in each cell
+PMKOE_df %>%
+    group_by(time, condition) %>%
+    identify_outliers(PMKOE_score) # 23 outliers
+# check assumption: normality in each cell (Shapiro-Wilk test)
+PMKOE_df %>%
+    group_by(time, condition) %>%
+    shapiro_test(PMKOE_score) # all p values less than 0.05, but test sensitive to large sample size
+# check assumption: normality in each cell (QQ plot)
+ggqqplot(PMKOE_df, "PMKOE_score", ggtheme = theme_bw()) + facet_grid(time ~ condition) # looks okay
+# check assumption: homogeneity of variance between cells
+leveneTest(PMKOE_score ~ time*condition, data = PMKOE_df) # p = 0.04, but group sizes are equal --> continue
+# check assumption: sphericity AKA equal variance in difference between repeated measures, applies to > 2 repetitions
+
+# mixed ANOVA
+PMKOE_ANOVA <- anova_test(data = PMKOE_df, dv = PMKOE_score, wid = unique, between = condition, within = time, type = 3, effect.size = "pes")
+get_anova_table(PMKOE_ANOVA)
+# main of condition: F(1, 268) = 22.51, p < 0.001***, partial eta2 = 0.077
+# main of time: F(1, 268) = 50.62, p < 0.001***, partial eta2 = 0.159
+# main of interaction: F(1, 268) = 0.78, p = 0.38, partial eta2 = 0.003
+
+# ------ PMK self-efficacy immediate one-sided t-test ------
+leveneTest(PMK ~ condition, data = RP) # p = 0.78
+
+PMK_I_ttest <- t.test(PMK ~ condition, alternative = "greater", var.equal = TRUE, data = RP)
+PMK_I_ttest # raw result shows traditional vs. overcoming barriers; t(383) = 2.14, p = 0.02*
+
+PMK_I_cohend <- psych::cohen.d(x = RP$PMK, group = RP$condition) 
+PMK_I_cohend # raw result shows overcoming barriers vs. traditional; 0.22
+
+# ------ PMK self-efficacy ANOVA ------
+PMK_D_cohend <- psych::cohen.d(x = RP$PMK_D, group = RP$condition) 
+PMK_D_cohend # 0.04
+
+# gather the columns PMK & PMK_D into long format
+PMK_df <- RP %>%
+    dplyr::select(unique, condition, PMK, PMK_D) %>%
+    rename(T1 = PMK,
+           T2 = PMK_D) %>%
+    gather(key = "time", value = "PMK_score", T1, T2) %>%
+    convert_as_factor(unique, condition, time)
+head(PMK_df)
+# double check n, m, & sd
+PMK_df %>%
+    group_by(time, condition) %>%
+    get_summary_stats(PMK_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# check assumption: no outliers in each cell
+PMK_df %>%
+    group_by(time, condition) %>%
+    identify_outliers(PMK_score) # 1 outlier
+# check assumption: normality in each cell (Shapiro-Wilk test)
+PMK_df %>%
+    group_by(time, condition) %>%
+    shapiro_test(PMK_score) # all p values less than 0.05, but test sensitive to large sample size
+# check assumption: normality in each cell (QQ plot)
+ggqqplot(PMK_df, "PMK_score", ggtheme = theme_bw()) + facet_grid(time ~ condition) # looks okay
+# check assumption: homogeneity of variance between cells
+leveneTest(PMK_score ~ time*condition, data = PMK_df) # p = 0.97
+# check assumption: sphericity AKA equal variance in difference between repeated measures, applies to > 2 repetitions
+
+# mixed ANOVA
+PMK_ANOVA <- anova_test(data = PMK_df, dv = PMK_score, wid = unique, between = condition, within = time, type = 3, effect.size = "pes")
+get_anova_table(PMK_ANOVA)
+# main of condition: F(1, 277) = 1.63, p = 0.20, partial eta2 = 0.006
+# main of time: F(1, 277) = 10.33, p = 0.001**, partial eta2 = 0.036
+# main of interaction: F(1, 277) = 3.20, p = 0.08, partial eta2 = 0.011
+
+# hypothesis 3 H0: overcoming barriers < traditional
+# ------ cost immediate one-sided t-test ------
+leveneTest(cost ~ condition, data = RP) # p = 0.68
+
+cost_I_ttest <- t.test(cost ~ condition, alternative = "less", var.equal = TRUE, data = RP)
+cost_I_ttest # raw result shows traditional vs. overcoming barriers; t(384) = 0.01, p = 0.50
+
+cost_I_cohend <- psych::cohen.d(x = RP$cost, group = RP$condition)
+cost_I_cohend 
+cost_I_cohend$cohen.d # raw result shows overcoming barriers vs. traditional; 0.001
+
+# ------ cost  ANOVA ------
+cost_D_cohend <- psych::cohen.d(x = RP$cost_D, group = RP$condition) 
+cost_D_cohend # -0.09
+
+# gather the columns cost & cost_D into long format
+cost_df <- RP %>%
+    dplyr::select(unique, condition, cost, cost_D) %>%
+    rename(T1 = cost,
+           T2 = cost_D) %>%
+    gather(key = "time", value = "cost_score", T1, T2) %>%
+    convert_as_factor(unique, condition, time)
+head(cost_df)
+# double check n, m, & sd
+cost_df %>%
+    group_by(time, condition) %>%
+    get_summary_stats(cost_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# check assumption: no outliers in each cell
+cost_df %>%
+    group_by(time, condition) %>%
+    identify_outliers(cost_score) # 5 outliers
+# check assumption: normality in each cell (Shapiro-Wilk test)
+cost_df %>%
+    group_by(time, condition) %>%
+    shapiro_test(cost_score) # all p values less than 0.05, but test sensitive to large sample size
+# check assumption: normality in each cell (QQ plot)
+ggqqplot(cost_df, "cost_score", ggtheme = theme_bw()) + facet_grid(time ~ condition) # looks okay
+# check assumption: homogeneity of variance between cells
+leveneTest(cost_score ~ time*condition, data = cost_df) # p = 0.76
+# check assumption: sphericity AKA equal variance in difference between repeated measures, applies to > 2 repetitions
+
+# mixed ANOVA
+cost_ANOVA <- anova_test(data = cost_df, dv = cost_score, wid = unique, between = condition, within = time, type = 3, effect.size = "pes")
+get_anova_table(cost_ANOVA)
+# main of condition: F(1, 278) = 0.19, p = 0.66, partial eta2 = 0.001
+# main of time: F(1, 278) = 0.30, p = 0.59, partial eta2 = 0.001
+# main of interaction: F(1, 278) = 0.66, p = 0.42, partial eta2 = 0.002
+
+# hypothesis 4 H0: overcoming barriers > traditional
+# ------ use_generalRP one-sided immediate t test ------
+leveneTest(use_generalRP ~ condition, data = RP) # p = 0.59
+
+use_generalRP_I_ttest <- t.test(use_generalRP ~ condition, alternative = "greater", var.equal = TRUE, data = RP)
+use_generalRP_I_ttest # raw result shows traditional vs. overcoming barriers; t(384) = 1.78, p = 0.04*
+
+use_generalRP_I_cohend <- psych::cohen.d(x = RP$use_generalRP, group = RP$condition)
+use_generalRP_I_cohend # raw result shows overcoming barriers vs. traditional; 0.18
+
+# ------ use_generalRP ANOVA ------
+use_generalRP_D_cohend <- psych::cohen.d(x = RP$use_generalRP_D, group = RP$condition) 
+use_generalRP_D_cohend # 0.12
+
+# gather the columns use_generalRP & use_generalRP_D into long format
+use_generalRP_df <- RP %>%
+    dplyr::select(unique, condition, use_generalRP, use_generalRP_D) %>%
+    rename(T1 = use_generalRP,
+           T2 = use_generalRP_D) %>%
+    gather(key = "time", value = "use_generalRP_score", T1, T2) %>%
+    convert_as_factor(unique, condition, time)
+head(use_generalRP_df)
+# double check n, m, & sd
+use_generalRP_df %>%
+    group_by(time, condition) %>%
+    get_summary_stats(use_generalRP_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# check assumption: no outliers in each cell
+use_generalRP_df %>%
+    group_by(time, condition) %>%
+    identify_outliers(use_generalRP_score) # 2 outliers
+# check assumption: normality in each cell (Shapiro-Wilk test)
+use_generalRP_df %>%
+    group_by(time, condition) %>%
+    shapiro_test(use_generalRP_score) # all p values less than 0.05, but test sensitive to large sample size
+# check assumption: normality in each cell (QQ plot)
+ggqqplot(use_generalRP_df, "use_generalRP_score", ggtheme = theme_bw()) + facet_grid(time ~ condition) # looks okay
+# check assumption: homogeneity of variance between cells
+leveneTest(use_generalRP_score ~ time*condition, data = use_generalRP_df) # p = 0.13
+# check assumption: sphericity AKA equal variance in difference between repeated measures, applies to > 2 repetitions
+
+# mixed ANOVA
+use_generalRP_ANOVA <- anova_test(data = use_generalRP_df, dv = use_generalRP_score, wid = unique, between = condition, within = time, type = 3, effect.size = "pes")
+get_anova_table(use_generalRP_ANOVA)
+# main of condition: F(1, 278) = 2.37, p = 0.13, partial eta2 = 0.008
+# main of time: F(1, 278) = 19.93, p < 0.001***, partial eta2 = 0.067 --> use_generalRP decreased over time
+# main of interaction: F(1, 278) = 0.13, p = 0.72, partial eta2 < 0.001
+```
+
+
+```{r hypothesis 5}
+RP$condition
+str(RP$condition)
+RP <- RP %>%
+  dplyr::mutate(condition_dum = ifelse(condition=="Barriers",1,0))
+RP$condition_dum
+
+# ------ full ------
+full_SEM <- "
+    # measurement model
+    PMK_T1 =~ PMK_1 + PMK_2 + PMK_3
+    PMK_T2 =~ PMK_1_D + PMK_2_D + PMK_3_D
+    cost_T1 =~ time_1 + time_2 + time_3 + time_4 + effort_1 + effort_2 + effort_3 + effort_4 + effort_5
+    cost_T2 =~ time_1_D + time_2_D + time_3_D + time_4_D + effort_1_D + effort_2_D + effort_3_D + effort_4_D + effort_5_D
+    # regressions
+    general ~ condition_dum
+    PMK_T1 ~ condition_dum
+    cost_T1 ~ condition_dum
+    use_generalRP ~ general + PMK_T1 + cost_T1
+    general_D ~ general
+    PMK_T2 ~ PMK_T1
+    cost_T2 ~ cost_T1
+    use_generalRP_D ~ general_D + PMK_T2 + cost_T2 + use_generalRP
+    # residual correlations
+    time_1 ~~ time_1_D
+    time_2 ~~ time_2_D
+    time_3 ~~ time_3_D
+    time_4 ~~ time_4_D
+    effort_1 ~~ effort_1_D
+    effort_2 ~~ effort_2_D
+    effort_3 ~~ effort_3_D
+    effort_4 ~~ effort_4_D
+    effort_5 ~~ effort_5_D
+    # variance
+    condition_dum ~~ condition_dum # has to write this otherwise won't print residual var of IVs
+"
+full_SEM_fit <- sem(full_SEM, data = RP)
+summary(full_SEM_fit, standardized = TRUE, fit.measures = TRUE)
+
+# ------ partial ------
+partial_SEM <- "
+    # measurement model
+    PMK_T1 =~ PMK_1 + PMK_2 + PMK_3
+    PMK_T2 =~ PMK_1_D + PMK_2_D + PMK_3_D
+    cost_T1 =~ time_1 + time_2 + time_3 + time_4 + effort_1 + effort_2 + effort_3 + effort_4 + effort_5
+    cost_T2 =~ time_1_D + time_2_D + time_3_D + time_4_D + effort_1_D + effort_2_D + effort_3_D + effort_4_D + effort_5_D
+    # regressions
+    general ~ condition_dum
+    PMK_T1 ~ condition_dum
+    cost_T1 ~ condition_dum
+    use_generalRP ~ general + PMK_T1 + cost_T1 + condition_dum
+    general_D ~ general
+    PMK_T2 ~ PMK_T1
+    cost_T2 ~ cost_T1
+    use_generalRP_D ~ general_D + PMK_T2 + cost_T2 + use_generalRP
+    # residual correlations
+    time_1 ~~ time_1_D
+    time_2 ~~ time_2_D
+    time_3 ~~ time_3_D
+    time_4 ~~ time_4_D
+    effort_1 ~~ effort_1_D
+    effort_2 ~~ effort_2_D
+    effort_3 ~~ effort_3_D
+    effort_4 ~~ effort_4_D
+    effort_5 ~~ effort_5_D
+    # variance
+    condition_dum ~~ condition_dum # has to write this otherwise won't print residual var of IVs
+"
+partial_SEM_fit <- sem(partial_SEM, data = RP)
+summary(partial_SEM_fit, standardized = TRUE, fit.measures = TRUE)
+
+# ------ full vs. partial ------
+anova(partial_SEM_fit, full_SEM_fit) 
+
+# ------ full + covar ------
+fullcovar_SEM <- "
+    # measurement model
+    PMK_T1 =~ PMK_1 + PMK_2 + PMK_3
+    PMK_T2 =~ PMK_1_D + PMK_2_D + PMK_3_D
+    cost_T1 =~ time_1 + time_2 + time_3 + time_4 + effort_1 + effort_2 + effort_3 + effort_4 + effort_5
+    cost_T2 =~ time_1_D + time_2_D + time_3_D + time_4_D + effort_1_D + effort_2_D + effort_3_D + effort_4_D + effort_5_D
+    # regressions
+    general ~ condition_dum
+    PMK_T1 ~ condition_dum
+    cost_T1 ~ condition_dum
+    use_generalRP ~ general + PMK_T1 + cost_T1
+    general_D ~ general
+    PMK_T2 ~ PMK_T1
+    cost_T2 ~ cost_T1
+    use_generalRP_D ~ general_D + PMK_T2 + cost_T2 + use_generalRP
+    # residual correlations
+    time_1 ~~ time_1_D
+    time_2 ~~ time_2_D
+    time_3 ~~ time_3_D
+    time_4 ~~ time_4_D
+    effort_1 ~~ effort_1_D
+    effort_2 ~~ effort_2_D
+    effort_3 ~~ effort_3_D
+    effort_4 ~~ effort_4_D
+    effort_5 ~~ effort_5_D
+    general ~~ cost_T1
+    general_D ~~ cost_T2
+    general ~~ PMK_T1
+    general_D ~~ PMK_T2
+    PMK_T1 ~~ cost_T1
+    PMK_T2 ~~ cost_T2
+    # variance
+    condition_dum ~~ condition_dum # has to write this otherwise won't print residual var of IVs
+"
+fullcovar_SEM_fit <- sem(fullcovar_SEM, data = RP)
+summary(fullcovar_SEM_fit, standardized = TRUE, fit.measures = TRUE)
+
+# ------ full + covar vs. full ------
+anova(fullcovar_SEM_fit, full_SEM_fit)
+```
+
+
+```{r exploratory: beliefs as covariates}
+# ------ cost T1 ~ beliefs T1 ------
+cost_beliefs <- lm(scale(cost) ~ condition + scale(impossBelief) + scale(diffImport) + scale(fixed), data = RP)
+summary(cost_beliefs) # reverse sign of Estimate for condition (Traditional vs. Barriers)
+
+# ------ PMK self-efficacy T1 ~ beliefs T1 ------
+PMK_beliefs <- lm(scale(PMK) ~ condition + scale(impossBelief) + scale(diffImport) + scale(fixed), data = RP)
+summary(PMK_beliefs) # reverse sign of Estimate for condition (Traditional vs. Barriers)
+```
+
+
+```{r exploratory: effects on non- & typical RP use}
+# ------ use_nonRP immediate two-sided t test ------
+leveneTest(use_nonRP ~ condition, data = RP) # p = 0.09
+
+use_nonRP_I_ttest <- t.test(use_nonRP ~ condition, var.equal = TRUE, data = RP)
+use_nonRP_I_ttest # raw result shows overcoming barriers vs. traditional; t(384) = -1.35, p = 0.18
+
+use_nonRP_I_cohend <- psych::cohen.d(x = RP$use_nonRP, group = RP$condition)
+use_nonRP_I_cohend # raw result shows traditional vs. overcoming barriers; -0.14
+
+# ------ use_nonRP ANOVA ------
+use_nonRP_D_cohend <- psych::cohen.d(x = RP$use_nonRP_D, group = RP$condition)
+use_nonRP_D_cohend # -0.18
+
+# gather the columns use_nonRP & use_nonRP_D into long format
+use_nonRP_df <- RP %>%
+    dplyr::select(unique, condition, use_nonRP, use_nonRP_D) %>%
+    rename(T1 = use_nonRP,
+           T2 = use_nonRP_D) %>%
+    gather(key = "time", value = "use_nonRP_score", T1, T2) %>%
+    convert_as_factor(unique, condition, time)
+head(use_nonRP_df)
+# double check n, m, & sd
+use_nonRP_df %>%
+    group_by(time, condition) %>%
+    get_summary_stats(use_nonRP_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# check assumption: no outliers in each cell
+use_nonRP_df %>%
+    group_by(time, condition) %>%
+    identify_outliers(use_nonRP_score) # 0 outlier
+# check assumption: normality in each cell (Shapiro-Wilk test)
+use_nonRP_df %>%
+    group_by(time, condition) %>%
+    shapiro_test(use_nonRP_score) # all p values less than 0.05, but test sensitive to large sample size
+# check assumption: normality in each cell (QQ plot)
+ggqqplot(use_nonRP_df, "use_nonRP_score", ggtheme = theme_bw()) + facet_grid(time ~ condition) # looks okay
+# check assumption: homogeneity of variance between cells
+leveneTest(use_nonRP_score ~ time*condition, data = use_nonRP_df) # p = 0.18
+# check assumption: sphericity AKA equal variance in difference between repeated measures, applies to > 2 repetitions
+
+# mixed ANOVA
+use_nonRP_ANOVA <- anova_test(data = use_nonRP_df, dv = use_nonRP_score, wid = unique, between = condition, within = time, type = 3, effect.size = "pes")
+get_anova_table(use_nonRP_ANOVA)
+# main of condition: F(1, 278) = 1.94, p = 0.17, partial eta2 = 0.007
+# main of time: F(1, 278) = 6.71, p = 0.01*, partial eta2 = 0.024 --> use_nonRP decreased over time
+# main of interaction: F(1, 278) = 0.50, p = 0.48, partial eta2 = 0.002
+
+# ------ use_typicalRP immediate two-sided t test ------
+leveneTest(use_typicalRP ~ condition, data = RP) # p = 0.69
+
+use_typicalRP_I_ttest <- t.test(use_typicalRP ~ condition, var.equal = TRUE, data = RP)
+use_typicalRP_I_ttest # raw result shows overcoming barriers vs. traditional; t(384) = -0.47, p = 0.64
+
+use_typicalRP_I_cohend <- psych::cohen.d(x = RP$use_typicalRP, group = RP$condition)
+use_typicalRP_I_cohend # raw result shows traditional vs. overcoming barriers; -0.05
+
+# ------ use_typicalRP ANOVA ------
+use_typicalRP_D_cohend <- psych::cohen.d(x = RP$use_typicalRP_D, group = RP$condition)
+use_typicalRP_D_cohend # 0.08
+
+# gather the columns use_typicalRP & use_typicalRP_D into long format
+use_typicalRP_df <- RP %>%
+    dplyr::select(unique, condition, use_typicalRP, use_typicalRP_D) %>%
+    rename(T1 = use_typicalRP,
+           T2 = use_typicalRP_D) %>%
+    gather(key = "time", value = "use_typicalRP_score", T1, T2) %>%
+    convert_as_factor(unique, condition, time)
+head(use_typicalRP_df)
+# double check n, m, & sd
+use_typicalRP_df %>%
+    group_by(time, condition) %>%
+    get_summary_stats(use_typicalRP_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# check assumption: no outliers in each cell
+use_typicalRP_df %>%
+    group_by(time, condition) %>%
+    identify_outliers(use_typicalRP_score) # 0 outliers
+# check assumption: normality in each cell (Shapiro-Wilk test)
+use_typicalRP_df %>%
+    group_by(time, condition) %>%
+    shapiro_test(use_typicalRP_score) # all p values less than 0.05, but test sensitive to large sample size
+# check assumption: normality in each cell (QQ plot)
+ggqqplot(use_typicalRP_df, "use_typicalRP_score", ggtheme = theme_bw()) + facet_grid(time ~ condition) # looks okay
+# check assumption: homogeneity of variance between cells
+leveneTest(use_typicalRP_score ~ time*condition, data = use_typicalRP_df) # p = 0.003**, but group sizes are equal --> continue
+# check assumption: sphericity AKA equal variance in difference between repeated measures, applies to > 2 repetitions
+
+# mixed ANOVA
+use_typicalRP_ANOVA <- anova_test(data = use_typicalRP_df, dv = use_typicalRP_score, wid = unique, between = condition, within = time, type = 3, effect.size = "pes")
+get_anova_table(use_typicalRP_ANOVA)
+# main of condition: F(1, 278) = 0.18, p = 0.67, partial eta2 = 0.001
+# main of time: F(1, 278) = 52.99, p < 0.001***, partial eta2 = 0.160
+# main of interaction: F(1, 278) = 0.51, p = 0.48, partial eta2 = 0.002
+```
+
+
+```{r exploratory: demographics as moderators}
+# ------ URM ------
+RP$URM
+sum(is.na(RP$URM)) # 1 NA
+
+# ------ URM: TMK immediate independent ANOVA ------
+# https://www.datanovia.com/en/lessons/anova-in-r/
+# IV: condition, URM
+URM_TMK_wide <- RP %>%
+    dplyr::select(unique, condition, URM, TMK, TMK_D) %>%
+    filter(is.na(URM) == FALSE) %>%
+    convert_as_factor(unique, condition, URM)
+head(URM_TMK_wide)
+# check n, m, & sd
+URM_TMK_wide %>%
+    group_by(condition, URM) %>%
+    get_summary_stats(TMK, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+URM_TMK_ANOVA <- URM_TMK_wide %>% 
+    anova_test(TMK ~ condition*URM, type = 3, effect.size = "pes")
+get_anova_table(URM_TMK_ANOVA)
+
+# ------ URM: TMK mixed ANOVA ------
+# https://www.datanovia.com/en/lessons/mixed-anova-in-r/#three-way-bbw-b
+# IV: condition, URM, time
+# gather the columns TMK & TMK_D into long format
+URM_TMK_long <- URM_TMK_wide %>%
+    rename(T1 = TMK,
+           T2 = TMK_D) %>%
+    gather(key = "time", value = "TMK_score", T1, T2) %>%
+    convert_as_factor(time)
+head(URM_TMK_long)
+# check n, m, & sd
+URM_TMK_long %>%
+    group_by(condition, URM, time) %>%
+    get_summary_stats(TMK_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# mixed (2 between 1 within) ANOVA
+URM_TMK_mixANOVA <- anova_test(data = URM_TMK_long, dv = TMK_score, wid = unique, 
+                               between = c(URM, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(URM_TMK_mixANOVA)
+# time: F(1, 275) = 19.80, p < 0.001***, pes = 0.067
+# URM:time F(1, 275) = 6.61, p = 0.01*, pes = 0.023
+# post hoc
+URM_TMK_oneway <- URM_TMK_long %>%
+    group_by(time) %>%
+    anova_test(dv = TMK_score, wid = unique, between = URM) %>%
+    get_anova_table() %>%
+    adjust_pvalue(method = "bonferroni")
+URM_TMK_oneway
+
+# ------ URM: PMK general examples immediate independent ANOVA ------
+# IV: condition, URM
+URM_PMKOE_wide <- RP %>%
+    dplyr::select(unique, condition, URM, general, general_D) %>%
+    filter(is.na(URM) == FALSE) %>%
+    convert_as_factor(unique, condition, URM)
+head(URM_PMKOE_wide)
+# check n, m, & sd
+URM_PMKOE_wide %>%
+    group_by(condition, URM) %>%
+    get_summary_stats(general, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+URM_PMKOE_ANOVA <- URM_PMKOE_wide %>% 
+    anova_test(general ~ condition*URM, type = 3, effect.size = "pes")
+get_anova_table(URM_PMKOE_ANOVA)
+
+# ------ URM: PMK general examples mixed ANOVA ------
+# IV: Condition, URM, time
+# gather the columns general & general_D into long format
+URM_PMKOE_long <- URM_PMKOE_wide %>%
+    rename(T1 = general,
+           T2 = general_D) %>%
+    gather(key = "time", value = "PMK_OE", T1, T2) %>%
+    convert_as_factor(time)
+head(URM_PMKOE_long)
+# check n, m, & sd
+URM_PMKOE_long %>%
+    group_by(condition, URM, time) %>%
+    get_summary_stats(PMK_OE, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# mixed (2 between 1 within) ANOVA
+URM_PMKOE_mixANOVA <- anova_test(data = URM_PMKOE_long, dv = PMK_OE, wid = unique, 
+                               between = c(URM, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(URM_PMKOE_mixANOVA)
+# condition: F(1, 265) = 16.61, p < 0.001, pes = 0.059
+# time: F(1, 265) = 36.37, p < 0.001, pes = 0.121
+
+# ------ URM: PMK self-efficacy immediate independent ANOVA ------
+# IV: condition, URM
+URM_PMK_wide <- RP %>%
+    dplyr::select(unique, condition, URM, PMK, PMK_D) %>%
+    filter(is.na(URM) == FALSE) %>%
+    convert_as_factor(unique, condition, URM)
+head(URM_PMK_wide)
+# check n, m, & sd
+URM_PMK_wide %>%
+    group_by(condition, URM) %>%
+    get_summary_stats(PMK, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+URM_PMK_ANOVA <- URM_PMK_wide %>% 
+    anova_test(PMK ~ condition*URM, type = 3, effect.size = "pes")
+get_anova_table(URM_PMK_ANOVA)
+
+# ------ URM: PMK self-efficacy mixed ANOVA ------
+# IV: condition, URM, time
+# gather the columns PMK & PMK_D into long format
+URM_PMK_long <- URM_PMK_wide %>%
+    rename(T1 = PMK,
+           T2 = PMK_D) %>%
+    gather(key = "time", value = "PMK_score", T1, T2) %>%
+    convert_as_factor(time)
+head(URM_PMK_long)
+# check n, m, & sd
+URM_PMK_long %>%
+    group_by(condition, URM, time) %>%
+    get_summary_stats(PMK_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# mixed (2 between 1 within) ANOVA
+URM_PMK_mixANOVA <- anova_test(data = URM_PMK_long, dv = PMK_score, wid = unique, 
+                               between = c(URM, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(URM_PMK_mixANOVA)
+# time: F(1, 274) = 4.61, p = 0.03*, pes = 0.017
+# condition:time F(1, 274) = 4.09, p = 0.04*, pes = 0.015
+URM_PMK_oneway <- URM_PMK_long %>%
+    group_by(URM) %>%
+    anova_test(dv = PMK_score, wid = unique, between = condition) %>%
+    get_anova_table() %>%
+    adjust_pvalue(method = "bonferroni")
+URM_PMK_oneway
+
+# ------ URM: cost immediate independent ANOVA ------
+# IV: condition, URM
+URM_cost_wide <- RP %>%
+    dplyr::select(unique, condition, URM, cost, cost_D) %>%
+    filter(is.na(URM) == FALSE) %>%
+    convert_as_factor(unique, condition, URM)
+head(URM_cost_wide)
+# check n, m, & sd
+URM_cost_wide %>%
+    group_by(condition, URM) %>%
+    get_summary_stats(cost, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+URM_cost_ANOVA <- URM_cost_wide %>% 
+    anova_test(cost ~ condition*URM, type = 3, effect.size = "pes")
+get_anova_table(URM_cost_ANOVA)
+
+# ------ URM: cost mixed ANOVA ------
+# IV: condition, URM, time
+# gather the columns cost & cost_D into long format
+URM_cost_long <- URM_cost_wide %>%
+    rename(T1 = cost,
+           T2 = cost_D) %>%
+    gather(key = "time", value = "cost_score", T1, T2) %>%
+    convert_as_factor(time)
+head(URM_cost_long)
+# check n, m, & sd
+URM_cost_long %>%
+    group_by(condition, URM, time) %>%
+    get_summary_stats(cost_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# mixed (2 between 1 within) ANOVA
+URM_cost_mixANOVA <- anova_test(data = URM_cost_long, dv = cost_score, wid = unique, 
+                               between = c(URM, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(URM_cost_mixANOVA)
+
+# ------ URM: use_generalRP immediate independent ANOVA ------
+# IV: condition, URM
+URM_usegen_wide <- RP %>%
+    dplyr::select(unique, condition, URM, use_generalRP, use_generalRP_D) %>%
+    filter(is.na(URM) == FALSE) %>%
+    convert_as_factor(unique, condition, URM)
+head(URM_usegen_wide)
+# check n, m, & sd
+URM_usegen_wide %>%
+    group_by(condition, URM) %>%
+    get_summary_stats(use_generalRP, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+URM_usegen_ANOVA <- URM_usegen_wide %>% 
+    anova_test(use_generalRP ~ condition*URM, type = 3, effect.size = "pes")
+get_anova_table(URM_usegen_ANOVA)
+
+# ------ URM: use_generalRP mixed ANOVA ------
+# IV: condition, URM, time
+# gather the columns use_generalRP & use_generalRP_D into long format
+URM_usegen_long <- URM_usegen_wide %>%
+    rename(T1 = use_generalRP,
+           T2 = use_generalRP_D) %>%
+    gather(key = "time", value = "usegen_score", T1, T2) %>%
+    convert_as_factor(time)
+head(URM_usegen_long)
+# check n, m, & sd
+URM_usegen_long %>%
+    group_by(condition, URM, time) %>%
+    get_summary_stats(usegen_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# mixed (2 between 1 within) ANOVA
+URM_usegen_mixANOVA <- anova_test(data = URM_usegen_long, dv = usegen_score, wid = unique, 
+                               between = c(URM, condition, URM), within = time, type = 3, effect.size = "pes")
+get_anova_table(URM_usegen_mixANOVA)
+# time: F(1, 275) = 17.68, p < 0.001***, pes = 0.060
+
+# ------ firstGen ------
+RP$firstGen
+sum(is.na(RP$firstGen)) # 3 NA
+
+# ------ firstGen: TMK immediate independent ANOVA ------
+# IV: condition, firstGen
+firstGen_TMK_wide <- RP %>%
+    dplyr::select(unique, condition, firstGen, TMK, TMK_D) %>%
+    filter(is.na(firstGen) == FALSE) %>%
+    convert_as_factor(unique, condition, firstGen)
+head(firstGen_TMK_wide)
+# check n, m, & sd
+firstGen_TMK_wide %>%
+    group_by(condition, firstGen) %>%
+    get_summary_stats(TMK, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+firstGen_TMK_ANOVA <- firstGen_TMK_wide %>% 
+    anova_test(TMK ~ condition*firstGen, type = 3, effect.size = "pes")
+get_anova_table(firstGen_TMK_ANOVA)
+
+# ------ firstGen: TMK mixed ANOVA ------
+# IV: condition, firstGen, time
+# gather the columns TMK & TMK_D into long format
+firstGen_TMK_long <- firstGen_TMK_wide %>%
+    rename(T1 = TMK,
+           T2 = TMK_D) %>%
+    gather(key = "time", value = "TMK_score", T1, T2) %>%
+    convert_as_factor(time)
+head(firstGen_TMK_long)
+# check n, m, & sd
+firstGen_TMK_long %>%
+    group_by(condition, firstGen, time) %>%
+    get_summary_stats(TMK_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# mixed (2 between 1 within) ANOVA
+firstGen_TMK_mixANOVA <- anova_test(data = firstGen_TMK_long, dv = TMK_score, wid = unique, 
+                               between = c(firstGen, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(firstGen_TMK_mixANOVA)
+# time: F(1, 275) = 24.38, p < 0.001***, pes = 0.081
+# firstGen:time F(1, 275) = 11.07, p = 0.001**, pes = 0.039
+# post hoc
+firstGen_TMK_oneway <- firstGen_TMK_long %>%
+    group_by(time) %>%
+    anova_test(dv = TMK_score, wid = unique, between = firstGen) %>%
+    get_anova_table() %>%
+    adjust_pvalue(method = "bonferroni")
+firstGen_TMK_oneway
+
+# ------ firstGen: PMK general examples immediate independent ANOVA ------
+# IV: Condition, firstGen
+firstGen_PMKOE_wide <- RP %>%
+    dplyr::select(unique, condition, firstGen, general, general_D) %>%
+    filter(is.na(firstGen) == FALSE) %>%
+    convert_as_factor(unique, condition, firstGen)
+head(firstGen_PMKOE_wide)
+# check n, m, & sd
+firstGen_PMKOE_wide %>%
+    group_by(condition, firstGen) %>%
+    get_summary_stats(general, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+firstGen_PMKOE_ANOVA <- firstGen_PMKOE_wide %>% 
+    anova_test(general ~ condition*firstGen, type = 3, effect.size = "pes")
+get_anova_table(firstGen_PMKOE_ANOVA)
+
+# ------ firstGen: PMK general examples mixed ANOVA ------
+# IV: Condition, firstGen, time
+# gather the columns general & general_D into long format
+firstGen_PMKOE_long <- firstGen_PMKOE_wide %>%
+    rename(T1 = general,
+           T2 = general_D) %>%
+    gather(key = "time", value = "PMK_OE", T1, T2) %>%
+    convert_as_factor(time)
+head(firstGen_PMKOE_long)
+# check n, m, & sd
+firstGen_PMKOE_long %>%
+    group_by(condition, firstGen, time) %>%
+    get_summary_stats(PMK_OE, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2) 
+
+# mixed (2 between 1 within) ANOVA
+firstGen_PMKOE_mixANOVA <- anova_test(data = firstGen_PMKOE_long, dv = PMK_OE, wid = unique, 
+                               between = c(firstGen, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(firstGen_PMKOE_mixANOVA)
+# condition: F(1, 265) = 17.33, p < 0.001***, pes = 0.061
+# time: F(1, 265) = 32.31, p < 0.001***, pes = 0.109
+
+# ------ firstGen: PMK self-efficacy immediate independent ANOVA ------
+# IV: condition, firstGen
+firstGen_PMK_wide <- RP %>%
+    dplyr::select(unique, condition, firstGen, PMK, PMK_D) %>%
+    filter(is.na(firstGen) == FALSE) %>%
+    convert_as_factor(unique, condition, firstGen)
+head(firstGen_PMK_wide)
+# check n, m, & sd
+firstGen_PMK_wide %>%
+    group_by(condition, firstGen) %>%
+    get_summary_stats(PMK, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+firstGen_PMK_ANOVA <- firstGen_PMK_wide %>% 
+    anova_test(PMK ~ condition*firstGen, type = 3, effect.size = "pes")
+get_anova_table(firstGen_PMK_ANOVA)
+
+# ------ firstGen: PMK self-efficacy mixed ANOVA ------
+# IV: condition, firstGen, time
+# gather the columns PMK & PMK_D into long format
+firstGen_PMK_long <- firstGen_PMK_wide %>%
+    rename(T1 = PMK,
+           T2 = PMK_D) %>%
+    gather(key = "time", value = "PMK_score", T1, T2) %>%
+    convert_as_factor(time)
+head(firstGen_PMK_long)
+# check n, m, & sd
+firstGen_PMK_long %>%
+    group_by(condition, firstGen, time) %>%
+    get_summary_stats(PMK_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2) 
+
+# mixed (2 between 1 within) ANOVA
+firstGen_PMK_mixANOVA <- anova_test(data = firstGen_PMK_long, dv = PMK_score, wid = unique, 
+                               between = c(firstGen, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(firstGen_PMK_mixANOVA)
+# time: F(1, 274) = 9.67, p = 0.002, pes = 0.034
+
+# ------ firstGen: cost immediate independent ANOVA ------
+# IV: condition, firstGen
+firstGen_cost_wide <- RP %>%
+    dplyr::select(unique, condition, firstGen, cost, cost_D) %>%
+    filter(is.na(firstGen) == FALSE) %>%
+    convert_as_factor(unique, condition, firstGen)
+head(firstGen_cost_wide)
+# check n, m, & sd
+firstGen_cost_wide %>%
+    group_by(condition, firstGen) %>%
+    get_summary_stats(cost, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+firstGen_cost_ANOVA <- firstGen_cost_wide %>% 
+    anova_test(cost ~ condition*firstGen, type = 3, effect.size = "pes")
+get_anova_table(firstGen_cost_ANOVA)
+
+# ------ firstGen: cost mixed ANOVA ------
+# IV: condition, firstGen, time
+# gather the columns cost & cost_D into long format
+firstGen_cost_long <- firstGen_cost_wide %>%
+    rename(T1 = cost,
+           T2 = cost_D) %>%
+    gather(key = "time", value = "cost_score", T1, T2) %>%
+    convert_as_factor(time)
+head(firstGen_cost_long)
+# check n, m, & sd
+firstGen_cost_long %>%
+    group_by(condition, firstGen, time) %>%
+    get_summary_stats(cost_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2) 
+
+# mixed (2 between 1 within) ANOVA
+firstGen_cost_mixANOVA <- anova_test(data = firstGen_cost_long, dv = cost_score, wid = unique, 
+                               between = c(firstGen, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(firstGen_cost_mixANOVA)
+
+# ------ firstGen: use_generalRP immediate independent ANOVA ------
+# IV: condition, firstGen
+firstGen_usegen_wide <- RP %>%
+    dplyr::select(unique, condition, firstGen, use_generalRP, use_generalRP_D) %>%
+    filter(is.na(firstGen) == FALSE) %>%
+    convert_as_factor(unique, condition, firstGen)
+head(firstGen_usegen_wide)
+# check n, m, & sd
+firstGen_usegen_wide %>%
+    group_by(condition, firstGen) %>%
+    get_summary_stats(use_generalRP, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# 2-way ANOVA
+firstGen_usegen_ANOVA <- firstGen_usegen_wide %>% 
+    anova_test(use_generalRP ~ condition*firstGen, type = 3, effect.size = "pes")
+get_anova_table(firstGen_usegen_ANOVA)
+
+# ------ firstGen: use_generalRP mixed ANOVA ------
+# IV: condition, firstGen, time
+# gather the columns use_generalRP & use_generalRP_D into long format
+firstGen_usegen_long <- firstGen_usegen_wide %>%
+    rename(T1 = use_generalRP,
+           T2 = use_generalRP_D) %>%
+    gather(key = "time", value = "usegen_score", T1, T2) %>%
+    convert_as_factor(time)
+head(firstGen_usegen_long)
+# check n, m, & sd
+firstGen_usegen_long %>%
+    group_by(condition, firstGen, time) %>%
+    get_summary_stats(usegen_score, type = "mean_sd") %>%
+    mutate_if(is.numeric, round, digits = 2)
+
+# mixed (2 between 1 within) ANOVA
+firstGen_usegen_mixANOVA <- anova_test(data = firstGen_usegen_long, dv = usegen_score, wid = unique, 
+                               between = c(firstGen, condition), within = time, type = 3, effect.size = "pes")
+get_anova_table(firstGen_usegen_mixANOVA)
+# condition: F(1, 275) = 5.63, p < 0.02*, pes = 0.020
+# time: F(1, 275) = 12.66, p < 0.001***, pes = 0.044
+```
+
+
+```{r inter-rater reliability}
+# ------ data cleaning ------
+# Coder1
+PMK_OE_Coder1 <- PMK_OE_Coder1 %>%
+  dplyr::mutate(typical_Coder1=(flashcards_Coder1+practicetests_Coder1),
+         typical_D_Coder1=(flashcards_D_Coder1+practicetests_D_Coder1),
+         general_Coder1=(activeretrieve_Coder1+assignments_Coder1+structure_Coder1+prompts_Coder1+freerecall_Coder1+selfexplain_Coder1+nonexperts_Coder1+experts_Coder1),
+         general_D_Coder1=(activeretrieve_D_Coder1+assignments_D_Coder1+structure_D_Coder1+prompts_D_Coder1+freerecall_D_Coder1+selfexplain_D_Coder1+nonexperts_D_Coder1+experts_D_Coder1))
+PMK_OE_Coder1$typical_Coder1
+PMK_OE_Coder1$typical_D_Coder1
+PMK_OE_Coder1$general_Coder1
+PMK_OE_Coder1$general_D_Coder1
+
+# RP
+PMK_OE_Coder2 <- PMK_OE_Coder2 %>%
+  dplyr::mutate(typical_Coder2=(flashcards_Coder2+practicetests_Coder2),
+         general_Coder2=(activeretrieve_Coder2+assignments_Coder2+structure_Coder2+prompts_Coder2+freerecall_Coder2+selfexplain_Coder2+nonexperts_Coder2+experts_Coder2))
+PMK_OE_Coder2$typical_Coder2
+PMK_OE_Coder2$general_Coder2
+
+# remove repeated col other than unique
+names(PMK_OE_Coder2)
+PMK_OE_Coder2 <- PMK_OE_Coder2 %>% dplyr::select(-PMK_OE)
+names(PMK_OE_Coder2)
+
+# combine df
+PMK_OE_Combined <- dplyr::inner_join(PMK_OE_Coder1, PMK_OE_Coder2, by = "unique")
+names(PMK_OE_Combined)
+
+# ------ irr ------
+kappa2(PMK_OE_Combined[, c("flashcards_Coder1", "flashcards_Coder2")], weight = "unweighted") # 0.98
+kappa2(PMK_OE_Combined[, c("practicetests_Coder1", "practicetests_Coder2")], weight = "unweighted") # 0.71
+kappa2(PMK_OE_Combined[, c("activeretrieve_Coder1", "activeretrieve_Coder2")], weight = "unweighted") # 0.79
+kappa2(PMK_OE_Combined[, c("assignments_Coder1", "assignments_Coder2")], weight = "unweighted") # 0.82
+kappa2(PMK_OE_Combined[, c("structure_Coder1", "structure_Coder2")], weight = "unweighted") # 0.80
+kappa2(PMK_OE_Combined[, c("prompts_Coder1", "prompts_Coder2")], weight = "unweighted") # 0.42
+kappa2(PMK_OE_Combined[, c("freerecall_Coder1", "freerecall_Coder2")], weight = "unweighted") # 0.73
+kappa2(PMK_OE_Combined[, c("selfexplain_Coder1", "selfexplain_Coder2")], weight = "unweighted") # 0.58
+kappa2(PMK_OE_Combined[, c("nonexperts_Coder1", "nonexperts_Coder2")], weight = "unweighted") # 0.90
+kappa2(PMK_OE_Combined[, c("experts_Coder1", "experts_Coder2")], weight = "unweighted") # 0.85
+
+icc(PMK_OE_Combined[, c("typical_Coder1", "typical_Coder2")], model = "twoway", type = "agreement", unit = "single") # 0.88 [0.85, 0.90]
+icc(PMK_OE_Combined[, c("general_Coder1", "general_Coder2")], model = "twoway", type = "agreement", unit = "single") # 0.86 [0.83, 0.89]
+```
+
